@@ -22,6 +22,7 @@ operands -> [[KW ","]* KW]
 from typing import Literal
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 @dataclass
 class Statement:
@@ -45,8 +46,9 @@ class Param:
 @dataclass
 class Kernel:
     name: str
-    params: list[Param] | None = None
-    instructions: list[Instruction] | None = None
+    params: list[Param] 
+    instructions: list[Instruction] 
+    registers: list[tuple[str, str, int]]
 
 def scanning(src:str|Path) -> list[Statement]:
     return [Statement(splitted) for splitted in map(str.split, open(src, "r"))
@@ -68,13 +70,14 @@ class Parser:
         return kernels
     def parse_kernel(self):
         name = self._current().tokens[-1][:-1]
-        params = []; instructions = []
+        params = []; instructions = []; registers = []
         while (c:=self._next()).tokens != [")"]:
             params.append(self._parse_param(c))
-        self._next(2)
+        self._next()
         while(c:=self._next()).tokens != ["}"]:
             if not c.tokens[0].startswith("."): instructions.append(self._parse_instruction(c))
-        return Kernel(name, params, instructions)
+            elif c.tokens[0]==".reg": registers.append(self._parse_register(c))
+        return Kernel(name, params, instructions, registers)
     def _parse_instruction(self, stmnt:Statement)->Instruction:
         tokens=stmnt.tokens
         predicate = tokens.pop(0) if tokens[0].startswith("@") else None
@@ -86,10 +89,15 @@ class Parser:
         type = tokens.pop(0).lstrip(".")
         varname = tokens.pop().rstrip(",")
         return Param(type, varname)
+    def _parse_register(self, stmnt:Statement)->tuple[str, str, int]:
+        tokens=stmnt.tokens
+        type = tokens[1].lstrip(".")
+        name, n = re.fullmatch(r"(%\w+)<(\d+)>;", tokens[-1]).groups()
+        return (type, name, int(n))
 
 
 if __name__=="__main__":
     stmnts = scanning("./matAdd.ptx")
     parser = Parser(stmnts)
     [kernel] = parser.parse()
-    print(kernel.params)
+    print(kernel.instructions)

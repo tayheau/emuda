@@ -1,5 +1,8 @@
+from __future__ import annotations
+import copy
+from dataclasses import dataclass
 from matplotlib.pylab import isin
-from typing import Literal
+from typing import Literal, Self
 import math
 import struct
 import re
@@ -7,11 +10,28 @@ from itertools import accumulate, product
 from parser import Kernel, Param, scanning, Parser
 
 
+@dataclass
+class Registers:
+    reg: dict[str, bytearray]; sreg: dict[str, int]
+    def uar(self, values:dict[str, int|bytearray])->Registers: #update and return 
+        for k, v in values.items():
+            if k in self.reg and isinstance(v, bytearray): self.reg[k] = v
+            elif k in self.sreg and isinstance(v, int): self.sreg[k] = v
+            else: raise ValueError(f"issue updating {k} in registers")
+        print(self)
+        return self
+    def copy_for_warp(self, warpid:int)->Registers:
+        r = copy.deepcopy(self)
+        r.sreg["%warpid"] = warpid
+        return r
 Dim3 = tuple[int, int, int]
+def _dim3_names(n:str): return [f"{n}.{d}" for d in ["x", "y", "z"]]
 ptx_types = {"s8":"b", "s16":"h", "s32":"i", "s64":"q",
              "u8":"B", "u16":"H", "u32":"I", "u64":"Q",
              "f16":"e", "f32":"f", "f64":"d", "pred":"?"}
-sregsKeys = ["%tid", "%ntid", "%laneid", "%warpid", "%nwarpid", "%ctaid", "%nctaid",]
+sregsKeys = [*_dim3_names("%tid"), *_dim3_names("%ntid"),
+             *_dim3_names("%ctaid"), *_dim3_names("%nctaid"),
+             "%laneid", "%warpid", "%nwarpid", ]
 Type = float | int | bytes
 def Ki(a:int): return a << 10
 def Mi(a:int): return a << 20
@@ -34,17 +54,39 @@ class Arena:
             value[:] = self.arena[ptr:ptr+len(value)]
 
 class CTA:
-    def __init__(self, *, nctaid:Dim3, ctaid:Dim3,
-                 state_space:list[Arena], registers_templates:tuple[dict[str, bytearray]], 
-                 kernel:Kernel,):
-        state_space.append(Arena(Ki(48))) #shared state space
-        nwarps = math.ceil(nctaid[0]*nctaid[1]*nctaid[2]/32)
-        self.warps = [Warp(state_space, registers_templates, ) for _ in range(nwarps)]
-        #add nctaid, ctaid & ntid to srge here - add tid to sreg in loop 
+    def __init__(self, *, nctaid:Dim3, ctaid:Dim3, ntid:Dim3, state_space:list[Arena], registers_templates:Registers, kernel:Kernel,):
+        state_space=state_space.copy(); state_space.append(Arena(Ki(48))) #"shared" state space
+        registers_templates.sreg["%nwarpid"] = math.ceil((nctaid[0]or 1)*(nctaid[1]or 1)*(nctaid[2]or 1)/32) #null dim should init to 1
+        cta_sreg = {"%nctaid":nctaid, "%ctaid":ctaid, "%ntid":ntid}
+        for n, dim in cta_sreg.items(): registers_templates.sreg.update(zip(_dim3_names(n), dim))
+        self.warps = [Warp(state_space, registers_templates.uar({"%warpid":warpid}),)
+                      for warpid in range(registers_templates.sreg["%nwarpid"])]
 
 class Warp:
-    # def 
-    pass
+    def __init__(self, state_space:list[Arena], registers_templates:Registers):
+        self.pc=[]; self.initiated=[]; self.alive=[]; self.regs = []
+        # for lane in range(32):
+        #     l_id = registers_templates.sreg["%wid"]
+        #     if (l_id:=registers_templates.sreg["%ntid.x"]
+        #
+        #
+            # check if the thread is alive: linear_id < ntid.x * ntid.y * ntid.z 
+            # init pc , pc thread_masking, overflow alive thread_masking 
+
+
+
+        # regs = copy.deepcopy(registers_templates) #TODO per thread tid, laneid 
+        # print(regs)
+    #     for lane in range(32):
+    #tid here 
+    #linear_id = %warpid * 32 + lane
+    # since linear_id = x + ctaid.x (y + ctaid.y z)
+    # x = linear_id % ctaid.x
+    # y = (linear_id // ctaid.x) % ctaid.y
+    # z = linear_id // (ctaid.x * ctaid.y) 
+
+
+    # pass
 
 
 class Emu:
@@ -83,13 +125,13 @@ class Emu:
         return offsets, param_stsp
 
     @staticmethod
-    def _gen_registers(kernel:Kernel):
-        return ({f"{n}{i}": bytearray(Emu._get_type_size(t, byte=True))
-                for t, n, s in kernel.registers
-                 for i in range(1, s+1)}, {n:0x0 for n in sregsKeys})
+    def _gen_registers(kernel:Kernel)->Registers:
+        return Registers({f"{n}{i}": bytearray(Emu._get_type_size(t, byte=True))
+                for t, n, s in kernel.registers for i in range(1, s+1)},
+                {name:0x0 for name in sregsKeys})
 
     def __call__(self, kernel:Kernel, gridDim:Dim3, blockDim:Dim3, paramValues:list[Type]):
-        param_space, offsets = Emu._init_param_space(kernel, paramValues)
+        offsets, param_space = Emu._init_param_space(kernel, paramValues)
         registers_templates = Emu._gen_registers(kernel)
         state_space = [self.global_state, param_space]
         # Emu._load_param_space(param_space, offsets, kernel, paramValues)
@@ -100,10 +142,12 @@ class Emu:
         #reg & sreg non adressable : no bytearray
         # 32 threads per warps, (blockDim.x * blockDim.y * blockDim.z) 
 
-        print(registers_templates)
+        # print(registers_templates.sreg)
     
-        # CTAs = [CTA(nctaid=blockDim, ctaid=(x,y,z), state_space=state_space, registers_template=registers_templates, kernel=kernel)
-        #         for x,y,z in product(range(gridDim[0]), range(gridDim[1]), range(gridDim[2]))]
+        # print(list( product(range(gridDim[0]), range(gridDim[1]), range(gridDim[2]))))
+        CTAs = [CTA(nctaid=gridDim, ntid=blockDim, ctaid=(x,y,z), state_space=state_space, registers_templates=registers_templates, kernel=kernel)
+                for x,y,z in product(range(gridDim[0])or[0], range(gridDim[1])or[0], range(gridDim[2])or[0])]
+        # print(CTAs)
 
 
 
